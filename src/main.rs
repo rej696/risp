@@ -1,8 +1,10 @@
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
 use std::num::ParseFloatError;
 use std::rc::Rc;
+// use rustyline::Result as ReadlineResult;
 
 #[derive(Clone)]
 enum RispExp {
@@ -217,21 +219,6 @@ fn parse_single_float(exp: &RispExp) -> Result<f64, RispErr> {
     }
 }
 
-fn eval_def_args(arg_forms: &[RispExp], env: &mut RispEnv) -> Result<RispExp, RispErr> {
-    let first_form = arg_forms.first().ok_or(RispErr::ExpectedForm)?;
-    let first_str = match first_form {
-        RispExp::Symbol(s) => Ok(s.clone()),
-        _ => Err(RispErr::InvalidDefForm),
-    }?;
-    let second_form = arg_forms.get(1).ok_or(RispErr::ExpectedForm)?;
-    if arg_forms.len() > 2 {
-        return Err(RispErr::InvalidDefForm);
-    }
-    let second_eval = eval(second_form, env)?;
-    env.data.insert(first_str, second_eval);
-
-    Ok(first_form.clone())
-}
 
 fn eval_cond_args(arg_forms: &[RispExp], env: &mut RispEnv) -> Result<RispExp, RispErr> {
     let first_form = arg_forms.first().ok_or(RispErr::ExpectedForm)?;
@@ -303,6 +290,44 @@ fn eval_lambda_args(arg_forms: &[RispExp]) -> Result<RispExp, RispErr> {
     }))
 }
 
+fn eval_def_args(arg_forms: &[RispExp], env: &mut RispEnv) -> Result<RispExp, RispErr> {
+    let first_form = arg_forms.first().ok_or(RispErr::ExpectedForm)?;
+    match first_form {
+        RispExp::Symbol(s) => {
+            let first_str = s.clone();
+            let second_form = arg_forms.get(1).ok_or(RispErr::ExpectedForm)?;
+            if arg_forms.len() > 2 {
+                return Err(RispErr::InvalidDefForm);
+            }
+            let second_eval = eval(second_form, env)?;
+            env.data.insert(first_str, second_eval);
+
+            Ok(first_form.clone())
+        },
+        RispExp::List(list) => {
+            let func_name_form = list.first().ok_or(RispErr::EmptyList)?;
+            let func_name_str = match func_name_form {
+                RispExp::Symbol(s) => Ok(s.clone()),
+                _ => Err(RispErr::InvalidDefForm),
+            }?;
+
+            let params_exp = RispExp::List(list.as_slice()[1..].to_vec());
+            let body_exp = arg_forms.get(1).ok_or(RispErr::ExpectedForm)?;
+            if arg_forms.len() > 2 {
+                return Err(RispErr::InvalidDefForm);
+            }
+            let func_lambda = RispExp::Lambda(RispLambda {
+                body_exp: Rc::new(body_exp.clone()),
+                params_exp: Rc::new(params_exp.clone()),
+            });
+            env.data.insert(func_name_str, func_lambda);
+
+            Ok(func_name_form.clone())
+        },
+        _ => Err(RispErr::InvalidDefForm),
+    }
+}
+
 fn eval_built_in_form(
     exp: &RispExp,
     arg_forms: &[RispExp],
@@ -312,8 +337,8 @@ fn eval_built_in_form(
         RispExp::Symbol(s) => match s.as_ref() {
             "cond" => Some(eval_cond_args(arg_forms, env)),
             "if" => Some(eval_if_args(arg_forms, env)),
-            "def" => Some(eval_def_args(arg_forms, env)),
-            "fn" => Some(eval_lambda_args(arg_forms)),
+            "define" => Some(eval_def_args(arg_forms, env)),
+            "lambda" => Some(eval_lambda_args(arg_forms)),
             _ => None,
         },
         _ => None,
@@ -413,25 +438,45 @@ fn parse_eval(expr: String, env: &mut RispEnv) -> Result<RispExp, RispErr> {
     Ok(evaled_exp)
 }
 
-fn slurp_expr() -> String {
-    let mut expr = String::new();
-
-    io::stdin()
-        .read_line(&mut expr)
-        .expect("Failed to read line");
-
-    expr
-}
-
-fn main() {
+fn main() -> Result<(), ReadlineError> {
     let env = &mut default_env();
-    loop {
-        println!("risp >");
-        let expr = slurp_expr();
+    let mut rl = Editor::<()>::new()?;
 
-        match parse_eval(expr, env) {
-            Ok(res) => println!("// {}", res),
-            Err(e) => println!("// {}", e),
+    println!("Welcome to Risp!");
+
+    if rl.load_history(".risp_history").is_err() {
+        println!("No history loaded.");
+    }
+
+    loop {
+        let readline = rl.readline("(risp) > ");
+        match readline {
+            Ok(expr) => {
+                rl.add_history_entry(expr.as_str());
+                match expr.as_str() {
+                    "(exit)" => {
+                        println!("exit");
+                        break;
+                    }
+                    _ => match parse_eval(expr, env) {
+                        Ok(res) => println!("{}", res),
+                        Err(e) => println!("Error: {}", e),
+                    },
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("CTRL-D");
+                break;
+            }
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
         }
     }
+    rl.save_history(".risp_history")
 }
